@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cardrank/cardrank"
+	"github.com/mitchellh/hashstructure/v2"
 	"golang.org/x/exp/slices"
 )
 
@@ -128,6 +129,7 @@ type GameState struct {
 	raiseCount    int
 	raiseAmount   int
 	registerLobby bool
+	hash          string //   `json:"z"` // external later
 }
 
 // Used to send a list of available tables
@@ -179,7 +181,6 @@ func createGameState(playerCount int, isMockGame bool, registerLobby bool) *Game
 		state.LastResult = WAITING_MESSAGE
 	}
 
-	log.Print("Created GameState")
 	return &state
 }
 
@@ -937,9 +938,16 @@ func (state *GameState) createClientState() *GameState {
 		stateCopy.MoveTime -= MOVE_TIME_GRACE_SECONDS
 	}
 
-	if stateCopy.MoveTime < 0 {
+	// No need to send move time if the calling player isn't the active player
+	if stateCopy.MoveTime < 0 || stateCopy.ActivePlayer != 0 {
 		stateCopy.MoveTime = 0
 	}
+
+	// Compute hash - this will be compared with an incoming hash. If the same, the entire state does not
+	// need to be sent back. This speeds up checks for change in state
+	stateCopy.hash = "0"
+	hash, _ := hashstructure.Hash(stateCopy, hashstructure.FormatV2, nil)
+	stateCopy.hash = fmt.Sprintf("%d", hash)
 
 	return &stateCopy
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/goccy/go-json"
 )
 
 // This started as a sync.Map but could revert back to a map since a keyed mutex is being used
@@ -33,7 +34,21 @@ func (m *KeyedMutex) Lock(key string) func() {
 }
 
 func main() {
-	log.Print("starting server...")
+	log.Print("Starting server...")
+
+	// Local dev mode - do not update live lobby
+	UpdateLobby = os.Getenv("GO_LOCAL") != "1" && os.Getenv("USER") != "eric"
+
+	if !UpdateLobby {
+		log.Printf("Running in LOCAL MODE. Not updating Lobby")
+	}
+
+	// Determine port for HTTP service.
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Listing on port %s", port)
 
 	router := gin.Default()
 
@@ -53,22 +68,52 @@ func main() {
 
 	//	router.GET("/REFRESHLOBBY", apiRefresh)
 
-	// Determine port for HTTP service.
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-		log.Printf("defaulting to port %s", port)
-	}
-
-	// Local dev mode - do not update live lobby
-	localMode := os.Getenv("GO_LOCAL")
-
-	UpdateLobby = localMode != "1"
-
 	initializeGameServer()
 	initializeRealTables()
 
 	router.Run(":" + port)
+}
+
+// Serializes the results, either as json (default), or raw (close to FujiNet json parsing result)
+// raw=1 -  or as key[char 0]value[char 0] pairs
+// - fc=U/L - (may use with raw) force data case all upper or lower
+
+func serializeResults(c *gin.Context, obj any) {
+	if c.Query("raw") == "1" {
+		lineDelimiter := "\u0000"
+		if c.Query("lf") == "1" {
+			lineDelimiter = "\n"
+		}
+		jsonBytes, _ := json.Marshal(obj)
+		jsonResult := string(jsonBytes)
+
+		// Strip out [,],{,}
+		jsonResult = strings.ReplaceAll(jsonResult, "{", "")
+		jsonResult = strings.ReplaceAll(jsonResult, "}", "")
+		jsonResult = strings.ReplaceAll(jsonResult, "[", "")
+		jsonResult = strings.ReplaceAll(jsonResult, "]", "")
+
+		// Convert : to new line
+		jsonResult = strings.ReplaceAll(jsonResult, ":", lineDelimiter)
+
+		// Convert commas to new line
+		jsonResult = strings.ReplaceAll(jsonResult, "\",", lineDelimiter)
+		jsonResult = strings.ReplaceAll(jsonResult, ",\"", lineDelimiter)
+		jsonResult = strings.ReplaceAll(jsonResult, "\"", "")
+
+		if c.Query("uc") == "1" {
+			jsonResult = strings.ToUpper(jsonResult)
+		}
+
+		if c.Query("lc") == "1" {
+			jsonResult = strings.ToLower(jsonResult)
+		}
+
+		c.String(http.StatusOK, jsonResult)
+
+	} else {
+		c.JSON(http.StatusOK, obj)
+	}
 }
 
 // Api Request steps
@@ -93,12 +138,13 @@ func apiMove(c *gin.Context) {
 		}
 	}()
 
-	c.JSON(http.StatusOK, state)
+	serializeResults(c, state)
 }
 
 // Steps forward in the emulated game and returns the updated state
 func apiState(c *gin.Context) {
 	playerCount, _ := strconv.Atoi(c.DefaultQuery("count", "0"))
+	hash := c.Query("hash")
 	state, unlock := getState(c, playerCount)
 
 	func() {
@@ -110,7 +156,13 @@ func apiState(c *gin.Context) {
 		state = state.createClientState()
 	}()
 
-	c.JSON(http.StatusOK, state)
+	// Check if passed in hash matches the state
+	if len(hash) > 0 && hash == state.hash {
+		serializeResults(c, "1")
+		return
+	}
+
+	serializeResults(c, state)
 }
 
 // Drop from the specified table
@@ -126,7 +178,7 @@ func apiLeave(c *gin.Context) {
 			saveState(state)
 		}
 	}()
-	c.JSON(http.StatusOK, "bye")
+	serializeResults(c, "bye")
 }
 
 // Returns a view of the current state without causing it to change. For debugging side-by-side with a client
@@ -156,10 +208,9 @@ func apiTables(c *gin.Context) {
 				tableOutput = append(tableOutput, table)
 			}
 		}
-
 	}
-
-	c.JSON(http.StatusOK, tableOutput)
+	serializeResults(c, tableOutput)
+	//c.JSON(http.StatusOK, tableOutput)
 }
 
 // Forces an update of all tables to the lobby - useful for adhoc use if the Lobby restarts or loses info
@@ -172,7 +223,7 @@ func apiUpdateLobby(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, "Lobby Updated")
+	serializeResults(c, "Lobby Updated")
 }
 
 // Gets the current game state for the specified table and adds the player id of the client to it
